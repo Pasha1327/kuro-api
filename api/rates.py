@@ -20,29 +20,9 @@ CURRENCY_SLUGS = {
     "RUB": "rus-rublesi",
 }
 
-CURRENCY_NAMES = {
-    "USD": ["Amerikan Doları", "USD"],
-    "EUR": ["Euro", "EUR"],
-    "RUB": ["Rus Rublesi", "RUB"],
-}
-
-def fetch_bank_page(bank_slug, currency):
+def fetch_html(bank_slug, currency):
     currency_slug = CURRENCY_SLUGS.get(currency, "amerikan-dolari")
     url = f"https://kur.doviz.com/{bank_slug}/{currency_slug}"
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "identity",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    })
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
-
-def fetch_bank_list_page(bank_slug, currency):
-    """Fetch the bank's currency list page (e.g. /garanti-bbva) to find all rates"""
-    url = f"https://kur.doviz.com/{bank_slug}"
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -52,72 +32,61 @@ def fetch_bank_list_page(bank_slug, currency):
     with urllib.request.urlopen(req, timeout=12) as resp:
         return resp.read().decode("utf-8", errors="ignore")
 
-def extract_rate_from_html(html, currency):
-    """Extract buy/sell rate from doviz.com HTML"""
-    
-    # Pattern 1: Table row with currency name and two numbers
-    # Matches rows like: | Garanti BBVA Amerikan Doları USD... | 44,9550 | 46,9550 | 21:17 |
-    currency_names = CURRENCY_NAMES.get(currency, ["USD"])
-    
-    for name in currency_names:
-        # Look for the currency in a table row context
-        # Pattern: currency_name followed by two decimal numbers
-        pattern = rf'{re.escape(name)}[^|]*\|\s*([\d]{{2,3}}[,.][\d]{{2,4}})\s*\|\s*([\d]{{2,3}}[,.][\d]{{2,4}})'
-        match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
-        if match:
-            buy  = float(match.group(1).replace(",", "."))
-            sell = float(match.group(2).replace(",", "."))
-            if 5 < buy < 1000 and 5 < sell < 1000:
-                return {"buy": buy, "sell": sell}
+def extract_rate(html):
+    # Strategy: find JSON data blocks with buying/selling
+    # doviz.com embeds data in script tags as JSON
 
-    # Pattern 2: JSON data embedded in page
-    # doviz.com sometimes embeds __NEXT_DATA__ or similar
-    json_patterns = [
-        r'"buying"\s*:\s*([\d]+\.[\d]+)[^}]*?"selling"\s*:\s*([\d]+\.[\d]+)',
-        r'"buy"\s*:\s*([\d]+\.[\d]+)[^}]*?"sell"\s*:\s*([\d]+\.[\d]+)',
-        r'"alis"\s*:\s*"?([\d,]+)"?[^}]*?"satis"\s*:\s*"?([\d,]+)"?',
-        r'"alış"\s*:\s*"?([\d,]+)"?[^}]*?"satış"\s*:\s*"?([\d,]+)"?',
-    ]
-    for pat in json_patterns:
-        m = re.search(pat, html, re.IGNORECASE)
+    # Pattern 1: Look for data in script tags - "buying" and "selling" fields
+    script_blocks = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+    
+    for block in script_blocks:
+        # Try to find buying/selling pattern
+        m = re.search(r'"buying"\s*:\s*([\d.]+)[^}]*"selling"\s*:\s*([\d.]+)', block)
         if m:
-            buy  = float(m.group(1).replace(",", "."))
-            sell = float(m.group(2).replace(",", "."))
-            if 5 < buy < 1000 and 5 < sell < 1000:
+            buy = float(m.group(1))
+            sell = float(m.group(2))
+            if 5 < buy < 500 and 5 < sell < 500 and sell >= buy:
+                return {"buy": buy, "sell": sell}
+        
+        # Try alis/satis
+        m = re.search(r'"alis"\s*:\s*"?([\d.]+)"?[^}]*"satis"\s*:\s*"?([\d.]+)"?', block, re.IGNORECASE)
+        if m:
+            buy = float(m.group(1))
+            sell = float(m.group(2))
+            if 5 < buy < 500 and 5 < sell < 500 and sell >= buy:
                 return {"buy": buy, "sell": sell}
 
-    # Pattern 3: Two consecutive TRY-range numbers near each other
-    # Find all numbers in valid TRY range
-    all_numbers = re.findall(r'\b([\d]{2,3}[,.][\d]{2,4})\b', html)
-    valid = []
-    for n in all_numbers:
-        val = float(n.replace(",", "."))
-        if 5 < val < 1000:
-            valid.append(val)
-    
-    # Find pairs where sell > buy and difference is reasonable (0.1-10%)
-    for i in range(len(valid) - 1):
-        buy = valid[i]
-        sell = valid[i+1]
-        if sell > buy and 0.001 < (sell - buy) / buy < 0.15:
+        # Try "data" array with buy/sell
+        m = re.search(r'"buy"\s*:\s*([\d.]+)[^}]*"sell"\s*:\s*([\d.]+)', block)
+        if m:
+            buy = float(m.group(1))
+            sell = float(m.group(2))
+            if 5 < buy < 500 and 5 < sell < 500 and sell >= buy:
+                return {"buy": buy, "sell": sell}
+
+    # Pattern 2: Look anywhere in HTML for JSON-like buying/selling
+    m = re.search(r'"buying"\s*:\s*([\d.]+)[^}]{0,50}"selling"\s*:\s*([\d.]+)', html)
+    if m:
+        buy = float(m.group(1))
+        sell = float(m.group(2))
+        if 5 < buy < 500 and 5 < sell < 500 and sell >= buy:
             return {"buy": buy, "sell": sell}
 
-    return None
+    # Pattern 3: data-buying / data-selling attributes
+    m = re.search(r'data-buying="([\d.]+)"[^"]*data-selling="([\d.]+)"', html)
+    if not m:
+        m = re.search(r'data-selling="([\d.]+)"[^"]*data-buying="([\d.]+)"', html)
+        if m:
+            sell = float(m.group(1))
+            buy = float(m.group(2))
+            if 5 < buy < 500 and 5 < sell < 500:
+                return {"buy": buy, "sell": sell}
+    if m:
+        buy = float(m.group(1))
+        sell = float(m.group(2))
+        if 5 < buy < 500 and 5 < sell < 500:
+            return {"buy": buy, "sell": sell}
 
-def fetch_rate(bank_slug, currency):
-    try:
-        html = fetch_bank_page(bank_slug, currency)
-        return extract_rate_from_html(html, currency)
-    except Exception:
-        pass
-    
-    # Fallback: try bank list page
-    try:
-        html = fetch_bank_list_page(bank_slug, currency)
-        return extract_rate_from_html(html, currency)
-    except Exception:
-        pass
-    
     return None
 
 
@@ -129,11 +98,26 @@ class handler(BaseHTTPRequestHandler):
         if currency not in ("USD", "EUR", "RUB"):
             currency = "USD"
 
-        # Debug mode
+        # Debug: search for numbers in range in HTML
         if "debug=1" in self.path:
             try:
-                html = fetch_bank_page("garanti-bbva", currency)
-                body = json.dumps({"html_length": len(html), "sample": html[:2000]}, ensure_ascii=False).encode("utf-8")
+                html = fetch_html("garanti-bbva", currency)
+                # Find all occurrences of numbers in TRY range with context
+                findings = []
+                for m in re.finditer(r'(buying|selling|alis|satis|buy|sell)["\s:]+([0-9.]+)', html, re.IGNORECASE):
+                    val = float(m.group(2)) if m.group(2) else 0
+                    if 5 < val < 500:
+                        start = max(0, m.start() - 30)
+                        end = min(len(html), m.end() + 30)
+                        findings.append({
+                            "key": m.group(1),
+                            "val": val,
+                            "ctx": html[start:end]
+                        })
+                body = json.dumps({
+                    "html_length": len(html),
+                    "findings": findings[:20]
+                }, ensure_ascii=False).encode("utf-8")
             except Exception as e:
                 body = json.dumps({"error": str(e)}).encode("utf-8")
             self.send_response(200)
@@ -145,15 +129,19 @@ class handler(BaseHTTPRequestHandler):
 
         results = []
         for bank in BANKS:
-            rate = fetch_rate(bank["slug"], currency)
-            if rate:
-                results.append({
-                    "name":  bank["name"],
-                    "short": bank["short"],
-                    "type":  bank["type"],
-                    "buy":   rate["buy"],
-                    "sell":  rate["sell"],
-                })
+            try:
+                html = fetch_html(bank["slug"], currency)
+                rate = extract_rate(html)
+                if rate:
+                    results.append({
+                        "name":  bank["name"],
+                        "short": bank["short"],
+                        "type":  bank["type"],
+                        "buy":   rate["buy"],
+                        "sell":  rate["sell"],
+                    })
+            except Exception:
+                pass
 
         results.sort(key=lambda x: x["sell"])
 
