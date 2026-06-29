@@ -26,47 +26,46 @@ def fetch_rate(bank_slug, currency):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9",
         "Accept-Encoding": "identity",
-        "Connection": "keep-alive",
     })
 
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
-        # Try multiple patterns
-        patterns = [
-            # Pattern 1: JSON-LD schema
-            r'"price"\s*:\s*"?([\d]+[.,][\d]+)"?',
-            # Pattern 2: data attributes
-            r'data-sell="([\d]+[.,][\d]+)"',
-            r'data-buy="([\d]+[.,][\d]+)"',
-            # Pattern 3: common HTML patterns on doviz.com
-            r'<span[^>]*class="[^"]*sell[^"]*"[^>]*>([\d]+[.,][\d]+)',
-            r'Satış[^<]*<[^>]+>([\d,\.]+)',
-            r'([\d]{2}[.,][\d]{2,4})\s*</span>',
-            # Pattern 4: any number that looks like TRY rate (30-60 range)
-            r'"sell_price"\s*:\s*([\d]+\.[\d]+)',
-            r'"satis"\s*:\s*"?([\d]+[.,][\d]+)"?',
-            r'"alis"\s*:\s*"?([\d]+[.,][\d]+)"?',
-        ]
+        # Primary pattern: "Alış / Satış" block with two numbers
+        # Matches: 46,2459 / 47,1815
+        pattern = r'Alış\s*/\s*Satış\s*<[^>]+>\s*([\d]+[,.][\d]+)\s*/\s*([\d]+[,.][\d]+)'
+        match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+        if match:
+            buy  = float(match.group(1).replace(",", "."))
+            sell = float(match.group(2).replace(",", "."))
+            if 10 < buy < 500 and 10 < sell < 500:
+                return {"buy": buy, "sell": sell}
 
-        numbers = []
-        for pattern in patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE)
-            for m in matches:
-                val = float(m.replace(",", "."))
-                if 20.0 < val < 200.0:  # reasonable TRY range
-                    numbers.append(val)
+        # Secondary: look for the pattern without tags between
+        pattern2 = r'Alış\s*/\s*Satış[^0-9]*([\d]+[,.][\d]+)\s*/\s*([\d]+[,.][\d]+)'
+        match2 = re.search(pattern2, html, re.IGNORECASE | re.DOTALL)
+        if match2:
+            buy  = float(match2.group(1).replace(",", "."))
+            sell = float(match2.group(2).replace(",", "."))
+            if 10 < buy < 500 and 10 < sell < 500:
+                return {"buy": buy, "sell": sell}
 
-        if len(numbers) >= 2:
-            numbers.sort()
-            return {"buy": numbers[0], "sell": numbers[-1]}
-        elif len(numbers) == 1:
-            return {"buy": round(numbers[0] * 0.97, 4), "sell": numbers[0]}
+        # Tertiary: find the large price number shown as current rate
+        # The main rate shown big on page e.g. "47,1815"
+        pattern3 = r'<strong[^>]*>\s*([\d]{2}[,.][\d]{4})\s*</strong>'
+        matches3 = re.findall(pattern3, html)
+        valid = [float(m.replace(",", ".")) for m in matches3 if 10 < float(m.replace(",", ".")) < 500]
+        if len(valid) >= 2:
+            valid.sort()
+            return {"buy": valid[0], "sell": valid[-1]}
+        elif len(valid) == 1:
+            sell = valid[0]
+            return {"buy": round(sell * 0.976, 4), "sell": sell}
 
-    except Exception as e:
+    except Exception:
         pass
 
     return None
