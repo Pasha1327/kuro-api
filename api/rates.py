@@ -14,7 +14,7 @@ BANKS = [
     {"name": "QNB Finansbank", "short": "Finans", "slug": "qnb-finansbank",  "type": "private"},
 ]
 
-def fetch_rate(bank_slug, currency):
+def fetch_html(bank_slug, currency):
     currency_map = {
         "USD": "amerikan-dolari",
         "EUR": "euro",
@@ -30,46 +30,25 @@ def fetch_rate(bank_slug, currency):
         "Accept-Encoding": "identity",
     })
 
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
 
-        # Primary pattern: "Alış / Satış" block with two numbers
-        # Matches: 46,2459 / 47,1815
-        pattern = r'Alış\s*/\s*Satış\s*<[^>]+>\s*([\d]+[,.][\d]+)\s*/\s*([\d]+[,.][\d]+)'
-        match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
-        if match:
-            buy  = float(match.group(1).replace(",", "."))
-            sell = float(match.group(2).replace(",", "."))
+def parse_rate(html):
+    patterns = [
+        r'Alış\s*/\s*Satış[^0-9]*([\d]+[,.][\d]+)\s*/\s*([\d]+[,.][\d]+)',
+        r'"alis"\s*:\s*"?([\d]+[,.][\d]+)"?[^}]*"satis"\s*:\s*"?([\d]+[,.][\d]+)"?',
+        r'data-alis="([\d]+[,.][\d]+)"[^"]*data-satis="([\d]+[,.][\d]+)"',
+        r'"buying"\s*:\s*([\d]+\.[\d]+)[^}]*"selling"\s*:\s*([\d]+\.[\d]+)',
+        r'"buy"\s*:\s*([\d]+\.[\d]+)[^}]*"sell"\s*:\s*([\d]+\.[\d]+)',
+    ]
+    for p in patterns:
+        m = re.search(p, html, re.IGNORECASE | re.DOTALL)
+        if m:
+            buy  = float(m.group(1).replace(",", "."))
+            sell = float(m.group(2).replace(",", "."))
             if 10 < buy < 500 and 10 < sell < 500:
                 return {"buy": buy, "sell": sell}
-
-        # Secondary: look for the pattern without tags between
-        pattern2 = r'Alış\s*/\s*Satış[^0-9]*([\d]+[,.][\d]+)\s*/\s*([\d]+[,.][\d]+)'
-        match2 = re.search(pattern2, html, re.IGNORECASE | re.DOTALL)
-        if match2:
-            buy  = float(match2.group(1).replace(",", "."))
-            sell = float(match2.group(2).replace(",", "."))
-            if 10 < buy < 500 and 10 < sell < 500:
-                return {"buy": buy, "sell": sell}
-
-        # Tertiary: find the large price number shown as current rate
-        # The main rate shown big on page e.g. "47,1815"
-        pattern3 = r'<strong[^>]*>\s*([\d]{2}[,.][\d]{4})\s*</strong>'
-        matches3 = re.findall(pattern3, html)
-        valid = [float(m.replace(",", ".")) for m in matches3 if 10 < float(m.replace(",", ".")) < 500]
-        if len(valid) >= 2:
-            valid.sort()
-            return {"buy": valid[0], "sell": valid[-1]}
-        elif len(valid) == 1:
-            sell = valid[0]
-            return {"buy": round(sell * 0.976, 4), "sell": sell}
-
-    except Exception:
-        pass
-
     return None
-
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -79,17 +58,37 @@ class handler(BaseHTTPRequestHandler):
         if currency not in ("USD", "EUR", "RUB"):
             currency = "USD"
 
+        # Debug mode: return raw HTML of first bank
+        if "debug=1" in self.path:
+            try:
+                html = fetch_html("ziraat-bankasi", currency)
+                # Return first 3000 chars to see structure
+                snippet = html[:3000]
+                body = json.dumps({"html": snippet}).encode("utf-8")
+            except Exception as e:
+                body = json.dumps({"error": str(e)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         results = []
         for bank in BANKS:
-            rate = fetch_rate(bank["slug"], currency)
-            if rate:
-                results.append({
-                    "name":  bank["name"],
-                    "short": bank["short"],
-                    "type":  bank["type"],
-                    "buy":   rate["buy"],
-                    "sell":  rate["sell"],
-                })
+            try:
+                html = fetch_html(bank["slug"], currency)
+                rate = parse_rate(html)
+                if rate:
+                    results.append({
+                        "name":  bank["name"],
+                        "short": bank["short"],
+                        "type":  bank["type"],
+                        "buy":   rate["buy"],
+                        "sell":  rate["sell"],
+                    })
+            except Exception:
+                pass
 
         results.sort(key=lambda x: x["sell"])
 
